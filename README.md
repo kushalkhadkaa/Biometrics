@@ -94,46 +94,87 @@ flowchart TD
 
 ---
 
-## Core Algorithmic Engineering
+## Core Algorithmic Engineering & Mathematical Formulations
+
+This section provides the rigorous mathematical definitions and algorithmic execution details for each step of the pipeline.
 
 ### 1. Robust Gray Normalization & Polarity Check
-- **Robust Stretch**: Outliers (dust, scanner glare) are suppressed by calculating:
-  $$I_{\text{out}} = \frac{I - I_{p_{\text{low}}}}{I_{p_{\text{high}}} - I_{p_{\text{low}}}}$$
-  bounded within `[0.0, 1.0]`, where default percentiles are $1.0\%$ and $99.0\%$.
-- **Polarity Inversion**: Automatic orientation check ensures dark ridges are represented on a light background. The border region median $M_b$ is compared to the center median $M_c$:
-  $$\text{Invert} = \begin{cases} \text{True} & \text{if } M_b < 0.42 \text{ and } M_c > M_b + 0.08 \\ \text{False} & \text{otherwise} \end{cases}$$
+- **Robust Percentile Contrast Rescaling**: To prevent extreme pixel values (dust, scanner glare, sensor clipping) from compressing the dynamic range of fingerprint ridges, we compute the low and high intensity percentiles $I_{p_{\text{low}}}$ (default 1.0%) and $I_{p_{\text{high}}}$ (default 99.0%). The rescaled floating-point intensity $I_{\text{out}}(x,y)$ is defined as:
+  $$I_{\text{out}}(x,y) = \text{clamp}\left( \frac{I(x,y) - I_{p_{\text{low}}}}{I_{p_{\text{high}}} - I_{p_{\text{low}}}}, \; 0.0, \; 1.0 \right)$$
+- **Automatic Polarity Inversion**: Latent prints can be captured on light backgrounds (dark ridges) or dark backing cards (light ridges). To guarantee a standardized representation (dark ridges on a light background), the median intensity of the outer border boundary region $M_b$ (within a margin of $w/16$) is compared with the median intensity of the central region $M_c$:
+  $$I_{\text{polar}}(x,y) = \begin{cases} 
+  1.0 - I_{\text{out}}(x,y) & \text{if } M_b < 0.42 \text{ and } M_c > M_b + 0.08 \\ 
+  I_{\text{out}}(x,y) & \text{otherwise} 
+  \end{cases}$$
 
 ### 2. Illumination Correction & CLAHE
-- **Illumination Correction**: Low-frequency background variations are modeled via a Gaussian blur kernel with standard deviation $\sigma = 26.0$. Subtracting this low-frequency baseline flattens uneven scans:
-  $$I_{\text{flat}} = I - \text{Gaussian}(I, \sigma) + \text{median}(\text{Gaussian}(I, \sigma))$$
-- **Local Contrast Stretching**: Contrast Limited Adaptive Histogram Equalization (CLAHE) is run on the flattened image using a grid size of $8 \times 8$ and clip limit of $2.0$. This maps local variations without introducing boundary halos.
+- **Illumination Correction via Background Subtraction**: uneven illumination is corrected by modeling the low-frequency background luminance via a large Gaussian blur kernel $G_{\sigma}$ where standard deviation $\sigma = 26.0$. Subtracting this low-frequency baseline flattens the background:
+  $$I_{\text{flat}}(x,y) = I_{\text{polar}}(x,y) - \left( I_{\text{polar}} * G_{\sigma} \right)(x,y) + \text{median}\left( I_{\text{polar}} * G_{\sigma} \right)$$
+- **Contrast Limited Adaptive Histogram Equalization (CLAHE)**: To prevent noise amplification while highlighting local ridge detail, the image is divided into $M \times N$ local tiles (default $8 \times 8$). For each tile, the local histogram $H(k)$ is computed. Values above a clip limit $\beta$ (default 2.0) are redistributed uniformly across all bins before mapping via the cumulative distribution function (CDF). Inter-tile boundary artifacts are suppressed via bilinear interpolation:
+  $$\beta = \alpha \cdot \frac{N_x \cdot N_y}{L}$$
+  where $N_x, N_y$ are the tile dimensions, $L$ is the number of gray levels, and $\alpha$ is the clip factor.
 
-### 3. Fingerprint ROI Segmentation
-- **Textural Strength Calculation**: Fingerprint ridges possess high gradients and high standard deviation compared to blank paper. The segmentation score map is computed as:
-  $$\text{Score} = 0.72 \cdot \sigma_{\text{local}}(I) + 0.28 \cdot \|\nabla I_{\text{Sobel}}\|$$
-  This score map is thresholded via Otsu's method.
-- **Morphological Closing**: The binary map is morphologically closed using a disk structuring element of radius $9$ to fill gaps, followed by a morphological opening of radius $3$ to remove speckle noise. Finally, a convex hull boundary is constructed.
+### 3. Texture-Based Fingerprint ROI Segmentation
+- **Texture-Gradient Composite Score**: Fingerprint ridges are characterized by structured contrast and directional edges. The foreground score map $S(x,y)$ combines local standard deviation and gradient magnitude:
+  $$S(x,y) = w_v \cdot \sigma_{\text{local}}(x,y) + w_g \cdot \sqrt{I_x(x,y)^2 + I_y(x,y)^2}$$
+  where $w_v = 0.72$, $w_g = 0.28$, and the local variance is computed over a sliding block $W$ of size $23 \times 23$:
+  $$\sigma_{\text{local}}(x,y) = \sqrt{\frac{1}{|W|} \sum_{(u,v) \in W} \left( I(u,v) - \mu(x,y) \right)^2}$$
+  $I_x$ and $I_y$ are estimated using Sobel kernels.
+- **Morphological Refining & Convex Hull**: The score map is binarized via Otsu's thresholding. The resulting mask $M_{\text{raw}}$ is refined to establish a smooth contiguous boundary:
+  $$M_{\text{segmented}} = \text{ConvexHull}\left( \left( M_{\text{raw}} \bullet S_{\text{disk}(9)} \right) \circ S_{\text{disk}(3)} \right)$$
+  where $\bullet$ represents morphological closing, $\circ$ represents morphological opening, and the structuring elements $S$ are disks of specified radii.
 
-### 4. Structure Tensor Angle Estimation
-- **Gradient Computation**: Gradients $I_x, I_y$ are computed using Sobel operators on a smoothed input ($\sigma=1.0$).
-- **Structure Tensor Construction**: The symmetric tensor $J$ is smoothed using a integration Gaussian window ($\sigma_{\text{integration}} = 5.0$):
-  $$J = \begin{bmatrix} \langle I_x^2 \rangle & \langle I_x I_y \rangle \\ \langle I_x I_y \rangle & \langle I_y^2 \rangle \end{bmatrix}$$
-- **Orientation & Coherence**: The ridge orientation angle $\theta$ is perpendicular to the primary gradient orientation:
-  $$\theta = \frac{1}{2} \arctan2\left(2\langle I_x I_y \rangle, \langle I_x^2 \rangle - \langle I_y^2 \rangle\right) + \frac{\pi}{2}$$
-  Coherence $C$ is computed to represent the anisotropy of the local structure:
-  $$C = \frac{\sqrt{(\langle I_x^2 \rangle - \langle I_y^2 \rangle)^2 + 4\langle I_x I_y \rangle^2}}{\langle I_x^2 \rangle + \langle I_y^2 \rangle + \epsilon}$$
+### 4. Bilateral Denoising & Structure Tensor Parameter Estimation
+- **Edge-Preserving Bilateral Filter**: Denoising is performed using a bilateral filter to smooth sensor and paper grain noise without degrading the high-frequency boundaries of ridge edges:
+  $$I_{\text{denoised}}(x,y) = \frac{1}{W_p(x,y)} \sum_{(u,v) \in \Omega} I(u,v) \exp\left( -\frac{(u-x)^2 + (v-y)^2}{2\sigma_d^2} \right) \exp\left( -\frac{(I(u,v)-I(x,y))^2}{2\sigma_r^2} \right)$$
+  where $\Omega$ is the neighborhood window (diameter $d=5$), $\sigma_d = 5.0$ (spatial variance), $\sigma_r = 35.0$ (range color variance), and $W_p$ is the normalization sum.
+- **Structure Tensor Construction**: The local orientation field is estimated by computing the symmetric structure tensor $J$ from smoothed gradients $I_x, I_y$:
+  $$J(x,y) = \begin{bmatrix} 
+  \langle I_x^2 \rangle_w & \langle I_x I_y \rangle_w \\ 
+  \langle I_x I_y \rangle_w & \langle I_y^2 \rangle_w 
+  \end{bmatrix}$$
+  where $\langle \cdot \rangle_w$ denotes local integration averaging convolved with a Gaussian window $G_{\sigma_i}$ ($\sigma_i = 5.0$).
+- **Local Orientation & Coherence**: The dominant ridge direction angle $\theta(x,y) \in [0, \pi)$ is perpendicular to the primary gradient eigenvector:
+  $$\theta(x,y) = \frac{1}{2} \arctan2\left( 2\langle I_x I_y \rangle_w, \; \langle I_x^2 \rangle_w - \langle I_y^2 \rangle_w \right) + \frac{\pi}{2}$$
+  Coherence $C(x,y)$ measures the local structural anisotropy, indicating the alignment strength of the ridges:
+  $$C(x,y) = \frac{\sqrt{ \left(\langle I_x^2 \rangle_w - \langle I_y^2 \rangle_w \right)^2 + 4\langle I_x I_y \rangle_w^2 }}{\langle I_x^2 \rangle_w + \langle I_y^2 \rangle_w + \epsilon}$$
+  where $\epsilon = 10^{-6}$ prevents division by zero.
 
-### 5. Multi-Source Masking & Guarded Reconstruction
-- **Ink Annotation Masking**: Standard gray ridges are neutral. Non-neutral writing inks are extracted by verifying that the HSV Saturation channel is $>55$ and the Absolute Value difference from the gray representation is $>30$.
-- **Straight Ruled Line Masking**: Ruling lines from notebook paper are isolated by detecting linear edges via Canny ($t_1=60, t_2=160$) and Hough Line Transform mapping. Lines longer than $34\%$ of the image dimension are masked.
-- **Adaptive handwriting Extraction**: Thick dark ink strokes are segmented by comparing the smoothed image with a large median filter window ($23 \times 23$). Regions where local median subtraction exceeds the $92\text{nd}$ percentile are masked.
-- **Guarded Inpainting**: When artifacts intersect the fingerprint, they are replaced. To protect scientific validity and prevent the fabrication of ridge structures:
-  $$\text{Inpaint Allowed} = \begin{cases} \text{True} & \text{if } A_{\text{component}} \le 1600 \text{ px}^2 \text{ and } \text{Support Ratio} \ge 55\% \\ \text{False} & \text{otherwise} \end{cases}$$
-  The support ratio evaluates the fraction of valid, clean fingerprint ridges in the surrounding neighborhood. Exceeded components are blocked (unpainted) and flagged.
+### 5. Multi-Source Masking Engine
+- **HSV Ink Saturation Masking**: Writing inks (stamps, pens) differ from grayscale ridges in the color saturation space. Pixels are masked if they exceed saturation and gray-deviation thresholds in the HSV space:
+  $$M_{\text{color}}(x,y) = \left( S_{\text{HSV}}(x,y) > 55 \right) \land \left( |V_{\text{HSV}}(x,y) - I_{\text{gray}}(x,y)| \cdot 255 > 30 \right)$$
+- **Hough Line Grid Masking**: Straight ruled lines are extracted by mapping Canny edge points to the parametric Hough accumulator space $(\rho, \phi)$:
+  $$\rho = x \cos \phi + y \sin \phi$$
+  Accumulator bin values exceeding $80$ votes are back-projected to locate line segments. Segments longer than $34\%$ of the image's minimum dimension are masked and dilated by a width of $5\text{ px}$.
+- **Adaptive handwriting Stroke Masking**: Thick handwriting strokes are extracted using a local median filter comparison. Pixels showing a large negative intensity deviation from the local median are masked:
+  $$\Delta I(x,y) = \text{median}_{23\times23}\left( I_{\text{base}} \right)(x,y) - I_{\text{base}}(x,y)$$
+  $$M_{\text{stroke}}(x,y) = \text{MorphologicalClosing}\left( \Delta I(x,y) > P_{92}(\Delta I), \; S_{\text{disk}(2)} \right)$$
+  where $P_{92}$ represents the $92\text{nd}$ percentile threshold computed over the segmented ROI region.
 
-### 6. Gabor Filter Enhancement
-- **Selective Directional Convolution**: Convolves the image with Gabor filter kernels tuned to the ridge period ($9.0\text{ px}$) and 12 distinct angular directions.
-- **Coherence Mask Blending**: Gabor outputs are blended into the image only where coherence $C > 0.18$ using a blend factor of $0.32$ to prevent introducing structure in noisy background areas.
+### 6. Guarded Reconstruction & Telea Inpainting
+- **Guarded Inpainting Decision Rules**: For each connected component $K_i$ in the cumulative artifact mask $M_{\text{artifact}}$, reconstruction is only permitted if the component is small enough and has sufficient surrounding structure support to prevent the creation of false ridge details:
+  $$\text{Reconstruct}(K_i) = \begin{cases} 
+  \text{True} & \text{if } \text{Area}(K_i) \le 1600\text{ px}^2 \land \max(\text{Width}(K_i), \text{Height}(K_i)) \le 48\text{ px} \land \text{Support}(K_i) \ge 0.55 \\ 
+  \text{False} & \text{otherwise} 
+  \end{cases}$$
+- **Neighborhood Support Ratio**: The support ratio evaluates the density of valid, clean fingerprint ridges surrounding the artifact component boundary:
+  $$\text{Support}(K_i) = \frac{\sum_{(u,v) \in \partial K_i} M_{\text{ROI}}(u,v) \cdot \left( 1 - M_{\text{artifact}}(u,v) \right)}{\sum_{(u,v) \in \partial K_i} 1}$$
+  where $\partial K_i$ is a dilated ring (width $6\text{ px}$) around the component boundary.
+- **Telea Fast Marching Inpainting**: Gaps where reconstruction is allowed are filled using Telea's method, which propagates image values inwards along the normal directions of the boundary interface, solving the Eikonal equation:
+  $$\|\nabla T\| = 1$$
+  where $T$ represents the time-of-arrival distance field. Gaps where reconstruction is blocked remain unaltered in the final output and are flagged with a quality warning.
+
+### 7. Orientation-Selective Gabor Enhancement
+- **Anisotropic Gabor Filtering**: The convolved enhanced image $E(x,y)$ is computed convolving the local neighborhood with a Gabor kernel $g$ tuned to the local ridge orientation angle $\theta(x,y)$ and standard ridge period $\lambda = 9.0\text{ px}$:
+  $$g(x,y; \theta, \lambda, \sigma, \gamma) = \exp\left( -\frac{x'^2 + \gamma^2 y'^2}{2\sigma^2} \right) \cos\left( 2\pi\frac{x'}{\lambda} \right)$$
+  $$x' = x \cos\theta + y \sin\theta, \quad y' = -x \sin\theta + y \cos\theta$$
+  where $\sigma = 4.0$ controls the Gaussian envelope bandwidth and $\gamma = 0.55$ defines the spatial aspect ratio.
+- **Coherence Blending**: To prevent introducing artificial patterns in unstructured regions, Gabor output is blended with the denoised image using the computed local coherence map $C(x,y)$ as a weight in reliable ROI regions:
+  $$I_{\text{enhanced}}(x,y) = \begin{cases} 
+  (1 - w_b) \cdot I(x,y) + w_b \cdot \left(I * g_{\theta}\right)(x,y) & \text{if } (x,y) \in M_{\text{ROI}} \land C(x,y) > 0.18 \\ 
+  I(x,y) & \text{otherwise} 
+  \end{cases}$$
+  where $w_b = 0.32$ is the maximum blending weight.
 
 ---
 
