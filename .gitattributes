@@ -1,0 +1,24 @@
+# Set default behavior to automatically normalize line endings.
+* text=auto
+
+# Force standard text files to be normalized to LF on checkout/commit
+*.py text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.ipynb text eol=lf
+
+# Force script files to retain standard line endings
+*.sh text eol=lf
+*.ps1 text eol=lf
+
+# Declare binary files to prevent Git from attempting to modify line endings
+*.jpeg binary
+*.jpg binary
+*.png binary
+*.bmp binary
+*.tif binary
+*.tiff binary
+*.pdf binary
+*.gif binary
