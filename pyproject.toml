@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ridgeflow-forensics"
+version = "1.0.0"
+description = "A scientifically bounded forensic fingerprint preprocessing, artifact masking, and ridge flow reconstruction pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Kushal Khadka", email = "9860478+kushalkhadkaa@users.noreply.github.com" }
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "pillow>=10.0",
+    "opencv-python-headless>=4.9",
+    "scikit-image>=0.23",
+    "matplotlib>=3.8",
+    "pandas>=2.2",
+    "flask>=3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/kushalkhadkaa/Biometrics"
+BugTracker = "https://github.com/kushalkhadkaa/Biometrics/issues"
