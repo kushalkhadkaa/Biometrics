@@ -1,0 +1,11 @@
+numpy>=1.26
+scipy>=1.13
+pillow>=10.0
+opencv-python-headless>=4.9
+scikit-image>=0.23
+matplotlib>=3.8
+pandas>=2.2
+ipywidgets>=8.1
+notebook>=7.0
+nbformat>=5.9
+flask>=3.0
