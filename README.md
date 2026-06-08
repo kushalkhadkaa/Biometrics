@@ -1,6 +1,6 @@
-# Forensic-Fingerprint-Enhancement-and-Reconstruction: Latent Preprocessing Pipeline
+# Fingerprint-Image-Enhancement-and-Reconstruction: Latent Preprocessing Pipeline
 
-Forensic-Fingerprint-Enhancement-and-Reconstruction is an industry-grade, scientifically bounded image processing suite and interactive workspace designed to isolate, clean, and reconstruct latent or noisy fingerprint evidence. 
+Fingerprint-Image-Enhancement-and-Reconstruction is an industry-grade, scientifically bounded image processing suite and interactive workspace designed to isolate, clean, and reconstruct latent or noisy fingerprint evidence. 
 
 By employing deterministic computer vision algorithms, the pipeline removes non-ridge artifacts—such as handwritten annotations, pen strokes, ruler markings, scanner crop lines, and scanner noise—while strictly preserving and validating the integrity of the underlying ridge flow.
 

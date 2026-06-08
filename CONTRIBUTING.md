@@ -1,4 +1,4 @@
-# Contributing to Forensic-Fingerprint-Enhancement-and-Reconstruction
+# Contributing to Fingerprint-Image-Enhancement-and-Reconstruction
 
 First off, thank you for taking the time to contribute! Contributions from the global open-source community help make this forensic tool more robust, performant, and secure.
 
