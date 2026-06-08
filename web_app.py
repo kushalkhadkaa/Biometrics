@@ -47,7 +47,7 @@ HTML = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RidgeFlow Forensics Console</title>
+  <title>Forensic Fingerprint Enhancement & Reconstruction Console</title>
   <style>
     :root {
       --bg: linear-gradient(180deg, #eef4f1 0%, #f6f8f7 58%, #edf1ee 100%);
@@ -513,7 +513,7 @@ HTML = """
   <div class="shell">
     <div class="topbar">
       <div class="brand">
-        <h1>RidgeFlow Forensics</h1>
+        <h1>Forensic Fingerprint Enhancement & Reconstruction</h1>
         <p>Automatic forensic preprocessing, artifact removal, reconstruction, and noise suppression.</p>
       </div>
       <div class="chip">Production auto mode</div>
@@ -1049,7 +1049,7 @@ def create_pdf_report(case_dir: Path, source_name: str, result_payload: dict) ->
     with PdfPages(pdf_path) as pdf:
         fig = plt.figure(figsize=(8.27, 11.69))
         fig.patch.set_facecolor("white")
-        fig.text(0.08, 0.95, "RidgeFlow Forensics Report", fontsize=20, fontweight="bold", color="#14333b")
+        fig.text(0.08, 0.95, "Forensic Fingerprint Enhancement & Reconstruction Report", fontsize=20, fontweight="bold", color="#14333b")
         fig.text(0.08, 0.92, f"Source: {source_name}", fontsize=11, color="#35505b")
         fig.text(0.08, 0.89, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", fontsize=11, color="#35505b")
         fig.text(0.08, 0.83, "Scientific assessment", fontsize=13, fontweight="bold", color="#14333b")
