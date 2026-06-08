@@ -18,7 +18,11 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 @dataclass
 class FingerprintConfig:
-    """Parameters for conservative forensic fingerprint preprocessing."""
+    """Configuration parameters for the conservative forensic fingerprint pipeline.
+    
+    Provides control over thresholds and kernel sizes across normalization, 
+    segmentation, artifact masking, inpainting, and Gabor filtering.
+    """
 
     input_dirs: tuple[str, ...] = ("utils/image", "utils")
     output_dir: str = "outputs"
@@ -70,6 +74,16 @@ class FingerprintConfig:
 
 @dataclass
 class PipelineResult:
+    """Structure housing outputs and intermediate stages of the preprocessing run.
+    
+    Attributes:
+        image_path: Source file path.
+        config: The configuration used.
+        stages: Dictionary mapping stage names (e.g. '01_normalized') to image arrays.
+        masks: Map of detected masks (e.g. 'roi', 'artifact_remove').
+        metrics: Quality and cleanup metrics.
+        warnings: Warnings generated during the process.
+    """
     image_path: Path
     config: FingerprintConfig
     stages: dict[str, np.ndarray]
@@ -79,8 +93,14 @@ class PipelineResult:
 
 
 def discover_images(input_dirs: Iterable[str | Path] = ("utils/image", "utils")) -> list[Path]:
-    """Find fingerprint images, accepting the requested utils/image path and current utils layout."""
+    """Scans configured directories for files with supported image extensions.
 
+    Args:
+        input_dirs: Iterable of directory paths to scan.
+
+    Returns:
+        Sorted list of unique Path objects pointing to detected images.
+    """
     paths: list[Path] = []
     for directory in input_dirs:
         base = Path(directory)
@@ -91,8 +111,17 @@ def discover_images(input_dirs: Iterable[str | Path] = ("utils/image", "utils"))
 
 
 def load_rgb(path: str | Path, apply_exif_orientation: bool = True) -> np.ndarray:
-    """Load an image as RGB uint8 while preserving the original file separately."""
+    """Loads an image file as a NumPy array in RGB format.
 
+    Corrects orientation issues automatically based on EXIF tags if requested.
+
+    Args:
+        path: Path to the image file.
+        apply_exif_orientation: If True, transposes the image based on EXIF tag metadata.
+
+    Returns:
+        NumPy uint8 array of shape (H, W, 3).
+    """
     image = Image.open(path).convert("RGB")
     if apply_exif_orientation:
         image = ImageOps.exif_transpose(image)
@@ -100,15 +129,40 @@ def load_rgb(path: str | Path, apply_exif_orientation: bool = True) -> np.ndarra
 
 
 def rgb_to_gray_float(rgb: np.ndarray) -> np.ndarray:
+    """Converts an RGB image array to a normalized single-channel floating point array.
+
+    Args:
+        rgb: NumPy uint8 array of shape (H, W, 3).
+
+    Returns:
+        Single-channel float32 array in range [0.0, 1.0].
+    """
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     return util.img_as_float32(gray)
 
 
 def as_uint8(image: np.ndarray) -> np.ndarray:
+    """Clips and casts a floating-point image array to 8-bit unsigned integer.
+
+    Args:
+        image: Single-channel or multi-channel float32 array in range [0.0, 1.0].
+
+    Returns:
+        NumPy uint8 array in range [0, 255].
+    """
     return np.clip(image * 255.0, 0, 255).astype(np.uint8)
 
 
 def robust_rescale(gray: np.ndarray, percentiles: tuple[float, float]) -> np.ndarray:
+    """Rescales image intensity using robust percentile bounds to handle outliers.
+
+    Args:
+        gray: Single-channel float32 image array.
+        percentiles: Tuple of low and high percentiles (e.g. (1.0, 99.0)) to bound the range.
+
+    Returns:
+        Intensity-rescaled float32 image array.
+    """
     lo, hi = np.percentile(gray[np.isfinite(gray)], percentiles)
     if hi <= lo:
         return np.clip(gray, 0.0, 1.0)
@@ -116,8 +170,18 @@ def robust_rescale(gray: np.ndarray, percentiles: tuple[float, float]) -> np.nda
 
 
 def maybe_invert(gray: np.ndarray, prefer_dark_ridges: bool = True) -> np.ndarray:
-    """Use a cautious global polarity check. Default forensic samples are dark ridges on light paper."""
+    """Inverts image polarity automatically if background and center median checks suggest it.
 
+    In forensic science, fingerprints are standardly represented as dark ridges 
+    on a light background. This function ensures consistency.
+
+    Args:
+        gray: Single-channel float32 image array.
+        prefer_dark_ridges: If True, forces dark ridges on light background representation.
+
+    Returns:
+        Polarity-corrected float32 image array.
+    """
     if not prefer_dark_ridges:
         return 1.0 - gray
 
@@ -141,18 +205,48 @@ def maybe_invert(gray: np.ndarray, prefer_dark_ridges: bool = True) -> np.ndarra
 
 
 def correct_illumination(gray: np.ndarray, sigma: float) -> np.ndarray:
+    """Applies a high-pass Gaussian filter to correct uneven background illumination.
+
+    Subtracts low-frequency illumination variations estimated via a large Gaussian kernel.
+
+    Args:
+        gray: Single-channel float32 image array.
+        sigma: Standard deviation of the Gaussian filter kernel.
+
+    Returns:
+        Corrected and normalized float32 image array.
+    """
     background = filters.gaussian(gray, sigma=sigma, preserve_range=True)
     corrected = gray - background + float(np.median(background))
     return robust_rescale(corrected, (1.0, 99.0))
 
 
 def clahe(gray: np.ndarray, clip_limit: float, tile_grid: int) -> np.ndarray:
+    """Enhances local contrast using Contrast Limited Adaptive Histogram Equalization.
+
+    Args:
+        gray: Single-channel float32 image.
+        clip_limit: Threshold for contrast limiting.
+        tile_grid: Grid size for histogram contextual regions (e.g. 8 for an 8x8 grid).
+
+    Returns:
+        Contrast-enhanced float32 image.
+    """
     tile = max(2, int(tile_grid))
     clahe_op = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=(tile, tile))
     return clahe_op.apply(as_uint8(gray)).astype(np.float32) / 255.0
 
 
 def local_std(gray: np.ndarray, block_size: int) -> np.ndarray:
+    """Calculates local standard deviation to assess texture strength.
+
+    Args:
+        gray: Single-channel float32 image.
+        block_size: Window size for local calculation.
+
+    Returns:
+        Standard deviation map (float32).
+    """
     block = max(3, int(block_size) | 1)
     mean = cv2.blur(gray.astype(np.float32), (block, block))
     mean_sq = cv2.blur((gray.astype(np.float32) ** 2), (block, block))
@@ -161,6 +255,14 @@ def local_std(gray: np.ndarray, block_size: int) -> np.ndarray:
 
 
 def gradient_magnitude(gray: np.ndarray) -> np.ndarray:
+    """Computes the magnitude of the image gradient using Sobel operators.
+
+    Args:
+        gray: Single-channel float32 image.
+
+    Returns:
+        Rescaled gradient magnitude map (float32).
+    """
     gx = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(gray.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
     mag = np.sqrt(gx**2 + gy**2)
@@ -168,6 +270,14 @@ def gradient_magnitude(gray: np.ndarray) -> np.ndarray:
 
 
 def otsu_mask(score: np.ndarray) -> np.ndarray:
+    """Creates a binary mask using Otsu global automatic thresholding.
+
+    Args:
+        score: Score/metric array.
+
+    Returns:
+        Boolean mask array of the same shape as input.
+    """
     finite = score[np.isfinite(score)]
     if finite.size == 0 or np.ptp(finite) < 1e-6:
         return np.zeros(score.shape, dtype=bool)
@@ -176,6 +286,15 @@ def otsu_mask(score: np.ndarray) -> np.ndarray:
 
 
 def keep_large_components(mask: np.ndarray, min_area: int) -> np.ndarray:
+    """Removes small connected components (noise) below a minimum area threshold.
+
+    Args:
+        mask: Boolean mask array.
+        min_area: Minimum pixel area required to preserve a component.
+
+    Returns:
+        Filtered boolean mask array.
+    """
     labeled = measure.label(mask)
     cleaned = np.zeros(mask.shape, dtype=bool)
     for region in measure.regionprops(labeled):
@@ -185,7 +304,21 @@ def keep_large_components(mask: np.ndarray, min_area: int) -> np.ndarray:
 
 
 def segment_fingerprint(gray: np.ndarray, cfg: FingerprintConfig) -> tuple[np.ndarray, np.ndarray]:
-    """Segment likely fingerprint ROI from texture and ridge contrast."""
+    """Segments the fingerprint Region of Interest (ROI) from background noise.
+
+    Combines texture variance and Sobel gradient magnitude scores to construct
+    a robust classification map, which is then refined via morphological operations
+    and convex hull modeling.
+
+    Args:
+        gray: Preprocessed single-channel float32 image.
+        cfg: Configuration parameters defining block sizes, weights, and opening radii.
+
+    Returns:
+        Tuple:
+            - Boolean mask indicating the segmented fingerprint ROI.
+            - Rescaled quality score map (float32).
+    """
 
     texture = robust_rescale(local_std(gray, cfg.segmentation_block_size), (2.0, 99.0))
     grad = gradient_magnitude(gray)
@@ -208,8 +341,21 @@ def segment_fingerprint(gray: np.ndarray, cfg: FingerprintConfig) -> tuple[np.nd
 
 
 def ridge_orientation(gray: np.ndarray, sigma: float = 5.0) -> tuple[np.ndarray, np.ndarray]:
-    """Estimate local ridge orientation and coherence from the structure tensor."""
+    """Estimates local ridge orientation and coherence from the structure tensor.
 
+    The structure tensor J = [ [gxx, gxy], [gxy, gyy] ] characterizes the dominant 
+    gradient directions. The orientation is computed perpendicular to the gradient.
+    Coherence measures the local anisotropy (strength of alignment).
+
+    Args:
+        gray: Preprocessed single-channel float32 image.
+        sigma: Standard deviation for Gaussian smoothing of the structure tensor components.
+
+    Returns:
+        Tuple:
+            - local ridge orientation angles (float32 array) in radians [0, pi).
+            - local coherence map (float32 array) in range [0.0, 1.0].
+    """
     smoothed = filters.gaussian(gray, sigma=1.0, preserve_range=True)
     gx = cv2.Sobel(smoothed.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(smoothed.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
@@ -225,8 +371,18 @@ def ridge_orientation(gray: np.ndarray, sigma: float = 5.0) -> tuple[np.ndarray,
 
 
 def ridge_preserving_denoise(gray: np.ndarray, cfg: FingerprintConfig) -> np.ndarray:
-    """Remove impulse and sensor noise with filters that avoid ridge merging."""
+    """Applies median and bilateral filtering to suppress sensor and compression noise.
 
+    Bilateral filtering preserves sharp edges (such as fingerprint ridge boundaries) 
+    while smoothing homogeneous or low-contrast regions.
+
+    Args:
+        gray: Single-channel float32 image.
+        cfg: Configuration parameters defining bilateral sigma and diameters.
+
+    Returns:
+        Denoised single-channel float32 image.
+    """
     denoised = gray.copy()
     median_size = int(cfg.denoise_median_size)
     if median_size >= 3:
@@ -244,8 +400,18 @@ def ridge_preserving_denoise(gray: np.ndarray, cfg: FingerprintConfig) -> np.nda
 
 
 def color_annotation_mask(rgb: np.ndarray, cfg: FingerprintConfig) -> np.ndarray:
-    """Detect colored pen, stamps, and markings without treating gray ridges as color artifacts."""
+    """Detects colored pen markings, stamps, and annotations.
 
+    Translates to HSV color space to evaluate saturation. Specifically avoids 
+    interpreting neutral gray fingerprint ridges or paper textures as color artifacts.
+
+    Args:
+        rgb: Input RGB image (uint8).
+        cfg: Configuration parameters specifying saturation thresholds and delta values.
+
+    Returns:
+        Boolean mask array highlighting detected color artifacts.
+    """
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     saturation = hsv[:, :, 1]
     value = hsv[:, :, 2]
@@ -257,8 +423,17 @@ def color_annotation_mask(rgb: np.ndarray, cfg: FingerprintConfig) -> np.ndarray
 
 
 def border_frame_mask(gray: np.ndarray) -> np.ndarray:
-    """Catch black scan borders and crop frames without touching central ridge detail."""
+    """Identifies and masks scanner borders, crop frames, and black background edges.
 
+    Uses morphological reconstruction starting from the outer margins of the image 
+    to prevent intersecting or overlapping central fingerprint details.
+
+    Args:
+        gray: Normalized single-channel float32 image.
+
+    Returns:
+        Boolean mask array of border artifacts.
+    """
     binary_dark = gray < np.percentile(gray, 2.5)
     h, w = gray.shape
     border = np.zeros_like(binary_dark)
@@ -274,8 +449,18 @@ def border_frame_mask(gray: np.ndarray) -> np.ndarray:
 
 
 def straight_line_mask(gray: np.ndarray, cfg: FingerprintConfig) -> np.ndarray:
-    """Detect long ruled-paper lines and cut/scan lines using Hough geometry."""
+    """Detects straight ruled notebook lines or scanner scanlines.
 
+    Applies Canny edge detection followed by the Probabilistic Hough Line Transform 
+    to locate linear structures and generates a dilated masking map.
+
+    Args:
+        gray: Normalized single-channel float32 image.
+        cfg: Configuration parameters specifying Hough thresholds and gaps.
+
+    Returns:
+        Boolean mask array of linear artifacts.
+    """
     u8 = as_uint8(robust_rescale(gray, (1.0, 99.0)))
     edges = cv2.Canny(u8, 60, 160)
     min_len = max(16, int(min(gray.shape) * cfg.line_min_length_ratio))
@@ -299,8 +484,22 @@ def straight_line_mask(gray: np.ndarray, cfg: FingerprintConfig) -> np.ndarray:
 
 
 def dark_component_artifact_mask(gray: np.ndarray, roi: np.ndarray, cfg: FingerprintConfig) -> tuple[np.ndarray, np.ndarray]:
-    """Find likely dark text/marks, separating conservative removal from review candidates."""
+    """Identifies dark text components, print letters, and high-contrast annotations.
 
+    Applies adaptive thresholding to detect local dark regions. Connected components 
+    are analyzed based on their area, aspect ratio, solidity, and overlap with the ROI 
+    to classify them as either definitive artifacts or review candidates.
+
+    Args:
+        gray: Single-channel float32 image.
+        roi: Segemented fingerprint foreground mask.
+        cfg: Configuration parameters for component dimensions and threshold parameters.
+
+    Returns:
+        Tuple:
+            - Boolean mask indicating components to automatically remove.
+            - Boolean mask indicating components flagged for manual review.
+    """
     blur = filters.gaussian(gray, sigma=0.8, preserve_range=True)
     adaptive = cv2.adaptiveThreshold(
         as_uint8(1.0 - blur),
@@ -360,8 +559,18 @@ def dark_component_artifact_mask(gray: np.ndarray, roi: np.ndarray, cfg: Fingerp
 
 
 def dark_ink_stroke_mask(gray: np.ndarray, roi: np.ndarray) -> np.ndarray:
-    """Detect thicker dark handwriting strokes by comparing to the local median background."""
+    """Detects thick handwriting ink strokes using a local median subtraction method.
 
+    Compares pixels with their local neighborhood median. Strong dark deviations 
+    are grouped into ink stroke masks if they meet size and elongation criteria.
+
+    Args:
+        gray: Single-channel float32 image.
+        roi: Boolean foreground fingerprint ROI mask.
+
+    Returns:
+        Boolean mask array of handwriting strokes.
+    """
     base = filters.gaussian(gray, sigma=1.0, preserve_range=True)
     local_median = ndi.median_filter(base, size=23)
     diff = np.clip(local_median - base, 0.0, 1.0)
@@ -389,6 +598,15 @@ def dark_ink_stroke_mask(gray: np.ndarray, roi: np.ndarray) -> np.ndarray:
 
 
 def manual_artifact_mask(shape: tuple[int, int], cfg: FingerprintConfig) -> np.ndarray:
+    """Generates a binary mask from user-specified manual annotation coordinates.
+
+    Args:
+        shape: Tuple of height and width (H, W).
+        cfg: Configuration parameter containing manual rectangles, lines, and polygons.
+
+    Returns:
+        Boolean mask array of manual exclusions.
+    """
     mask = np.zeros(shape, dtype=np.uint8)
     for x, y, w, h in cfg.manual_rectangles:
         cv2.rectangle(mask, (int(x), int(y)), (int(x + w), int(y + h)), 255, -1)
@@ -402,6 +620,17 @@ def manual_artifact_mask(shape: tuple[int, int], cfg: FingerprintConfig) -> np.n
 
 
 def build_artifact_masks(rgb: np.ndarray, gray: np.ndarray, roi: np.ndarray, cfg: FingerprintConfig) -> dict[str, np.ndarray]:
+    """Aggregates all automated and manual masking modules into a unified directory map.
+
+    Args:
+        rgb: Input RGB image array.
+        gray: Denoised single-channel float32 image array.
+        roi: Segmented fingerprint ROI mask.
+        cfg: Configuration settings.
+
+    Returns:
+        Dictionary mapping mask keys to their respective boolean arrays.
+    """
     color_mask = color_annotation_mask(rgb, cfg)
     line_mask = straight_line_mask(gray, cfg)
     protected_roi = ndi.binary_dilation(roi, iterations=8)
@@ -431,6 +660,19 @@ def build_artifact_masks(rgb: np.ndarray, gray: np.ndarray, roi: np.ndarray, cfg
 
 
 def component_support_ratio(mask: np.ndarray, component: np.ndarray, roi: np.ndarray, radius: int = 6) -> float:
+    """Calculates the ratio of clean (non-masked) fingerprint pixels in the local neighborhood.
+
+    Ensures that inpainting is supported by surrounding valid ridge structures.
+
+    Args:
+        mask: Boolean mask indicating all removed artifact pixels.
+        component: Boolean mask of the specific connected component being evaluated.
+        roi: Fingerprint foreground ROI mask.
+        radius: Dilation radius used to define the neighborhood boundary.
+
+    Returns:
+        Float ratio in range [0.0, 1.0] of clean valid foreground pixels in the neighborhood.
+    """
     around = ndi.binary_dilation(component, iterations=radius) & ~component
     if around.sum() == 0:
         return 0.0
@@ -438,8 +680,25 @@ def component_support_ratio(mask: np.ndarray, component: np.ndarray, roi: np.nda
 
 
 def guarded_inpaint(gray: np.ndarray, artifact_mask: np.ndarray, roi: np.ndarray, cfg: FingerprintConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Inpaint only small, well-supported gaps. Larger or unsupported gaps remain blocked."""
+    """Applies a guarded inpainting strategy to restore ridge lines.
 
+    Restores regions only if their size is within limits and they have strong
+    structural support from neighboring clean ridges. Large gaps or unsupported 
+    areas remain blocked (un-inpainted) to maintain forensic integrity and avoid 
+    generating false details.
+
+    Args:
+        gray: Single-channel float32 image.
+        artifact_mask: Boolean mask indicating pixels slated for removal.
+        roi: Boolean foreground ROI mask.
+        cfg: Configuration parameters controlling limits and support thresholds.
+
+    Returns:
+        Tuple:
+            - Reconstructed single-channel float32 image.
+            - Boolean mask indicating successful reconstruction (inpainted) regions.
+            - Boolean mask indicating blocked (unaltered) regions.
+    """
     allowed = np.zeros_like(artifact_mask, dtype=bool)
     blocked = np.zeros_like(artifact_mask, dtype=bool)
     labeled = measure.label(artifact_mask)
@@ -480,8 +739,18 @@ def guarded_inpaint(gray: np.ndarray, artifact_mask: np.ndarray, roi: np.ndarray
 
 
 def post_denoise_clean_view(image: np.ndarray, roi: np.ndarray, strength: float) -> np.ndarray:
-    """Optional final UI cleanup that reduces speckle without merging ridges aggressively."""
+    """Performs an optional final bilateral filter pass over the fingerprint.
 
+    Smoothes fine artifacts and granular noise while keeping ridges sharp.
+
+    Args:
+        image: Single-channel float32 image.
+        roi: Boolean fingerprint ROI mask.
+        strength: Control factor (0.0 to 1.0) defining the blend of the filter output.
+
+    Returns:
+        Filtered float32 image array.
+    """
     strength = float(np.clip(strength, 0.0, 1.0))
     if strength <= 0:
         return image.astype(np.float32)
@@ -503,8 +772,19 @@ def finalize_clean_display(
     roi: np.ndarray,
     cfg: FingerprintConfig,
 ) -> np.ndarray:
-    """Build the displayed clean image with stronger local cleanup confined to artifact regions."""
+    """Applies local inpaint clean-up focused strictly within masked artifact regions.
 
+    Ensures that visual details outside the artifact masks remain completely untouched.
+
+    Args:
+        image: Single-channel float32 image.
+        artifact_mask: Boolean mask indicating regions containing removed artifacts.
+        roi: Foreground fingerprint ROI mask.
+        cfg: Configuration parameters specifying dilation and radius parameters.
+
+    Returns:
+        Final display float32 image.
+    """
     cleanup_mask = artifact_mask.copy()
     if cfg.final_cleanup_dilate > 0:
         cleanup_mask = ndi.binary_dilation(cleanup_mask, iterations=int(cfg.final_cleanup_dilate))
@@ -524,8 +804,21 @@ def finalize_clean_display(
 
 
 def gabor_enhance(gray: np.ndarray, orientation: np.ndarray, roi: np.ndarray, coherence: np.ndarray, cfg: FingerprintConfig) -> np.ndarray:
-    """Mild orientation-guided enhancement for analysis visualization."""
+    """Enhances ridge flow clarity by applying directionally selective Gabor filters.
 
+    Applies a bank of Gabor filters tuned to the target ridge period and orientation angles. 
+    Blend coefficients restrict changes to regions with confident coherence scores.
+
+    Args:
+        gray: Single-channel float32 image.
+        orientation: Local ridge orientation angle map.
+        roi: Boolean foreground ROI mask.
+        coherence: Local structural coherence map.
+        cfg: Configuration specifying frequency, blending, and orientation counts.
+
+    Returns:
+        Gabor-enhanced float32 image.
+    """
     n = max(4, int(cfg.gabor_orientations))
     ksize = int(cfg.gabor_kernel_size) | 1
     frequency = 1.0 / max(3.0, float(cfg.ridge_period_px))
@@ -539,7 +832,7 @@ def gabor_enhance(gray: np.ndarray, orientation: np.ndarray, roi: np.ndarray, co
         kernel -= kernel.mean()
         denom = np.sum(np.abs(kernel)) + 1e-6
         kernel = kernel / denom
-        response = cv2.filter2D(centered.astype(np.float32), cv2.CV_32F, kernel)
+        response = cv2.filter2D(centered.astype(np.float32), cv2.CV_32F, ksize=cv2.CV_32F, kernel=kernel)
         responses.append(response)
     stack = np.stack(responses, axis=0)
     idx = np.argmin(np.abs(np.angle(np.exp(1j * (orientation[None, ...] - angles[:, None, None])))), axis=0)
@@ -554,7 +847,17 @@ def gabor_enhance(gray: np.ndarray, orientation: np.ndarray, roi: np.ndarray, co
 
 
 def binarize_for_preview(enhanced: np.ndarray, roi: np.ndarray) -> np.ndarray:
-    """Preview-only ridge map. Do not use as replacement evidence."""
+    """Produces a binary preview map of the fingerprint ridges.
+
+    Uses Sauvola local adaptive thresholding. Flagged for review-only purposes.
+
+    Args:
+        enhanced: Enhanced single-channel float32 image.
+        roi: Boolean foreground ROI mask.
+
+    Returns:
+        Binary ridge map (float32 where ridges are 0.0 and background is 1.0).
+    """
 
     out = np.ones_like(enhanced, dtype=np.float32)
     if np.any(roi):
@@ -574,6 +877,20 @@ def quality_metrics(
     inpaint_allowed: np.ndarray,
     inpaint_blocked: np.ndarray,
 ) -> dict[str, float | int | str]:
+    """Computes comprehensive quality, contrast, noise, and reconstruction metrics.
+
+    Args:
+        original: Original grayscale float32 image array.
+        processed: Final preprocessed float32 image array.
+        roi: Boolean foreground ROI mask.
+        coherence: Local structural coherence map.
+        artifact_mask: Boolean mask indicating all detected artifacts.
+        inpaint_allowed: Boolean mask of reconstructed pixels.
+        inpaint_blocked: Boolean mask of blocked artifact pixels.
+
+    Returns:
+        Dictionary mapping metric names to computed values.
+    """
     roi_pixels = int(roi.sum())
     total_pixels = int(roi.size)
     roi_values = processed[roi] if roi_pixels else processed.ravel()
@@ -598,6 +915,15 @@ def quality_metrics(
 
 
 def collect_warnings(metrics: dict[str, float | int | str], review_mask: np.ndarray) -> list[str]:
+    """Generates standard forensic warning flags based on statistical quality limits.
+
+    Args:
+        metrics: Quality metrics dictionary.
+        review_mask: Boolean mask of review candidates.
+
+    Returns:
+        List of warning string descriptions.
+    """
     warnings: list[str] = []
     if float(metrics["reconstructed_pct_roi"]) > 2.0:
         warnings.append("More than 2% of ROI pixels were reconstructed; inspect provenance before forensic use.")
@@ -615,6 +941,20 @@ def run_pipeline(
     cfg: FingerprintConfig | None = None,
     progress_callback: Any | None = None,
 ) -> PipelineResult:
+    """Executes the complete forensic fingerprint processing and reconstruction pipeline.
+
+    Processes a target image file step-by-step: loads, normalizes, segments,
+    denoises, extracts ridge parameters, masks and inpaints artifacts, applies
+    Gabor filter enhancement, and computes diagnostic quality stats.
+
+    Args:
+        image_path: Path to the target image file.
+        cfg: Configuration parameters. If None, default FingerprintConfig is initialized.
+        progress_callback: Optional callable for reporting execution progress.
+
+    Returns:
+        PipelineResult object containing processed images, masks, and quality metrics.
+    """
     cfg = cfg or FingerprintConfig()
     path = Path(image_path)
 
@@ -692,6 +1032,17 @@ def mask_overlay(
     color: tuple[float, float, float] = (1.0, 0.0, 0.0),
     alpha: float = 0.45,
 ) -> np.ndarray:
+    """Overlays a binary mask onto a grayscale image using a specified color and alpha blend.
+
+    Args:
+        image: Grayscale float32 image array.
+        mask: Boolean mask array of the same shape.
+        color: RGB float tuple (each channel in range [0.0, 1.0]).
+        alpha: Transparency factor in range [0.0, 1.0].
+
+    Returns:
+        RGB float32 image array showing the mask overlay.
+    """
     base = np.dstack([image, image, image]) if image.ndim == 2 else image.astype(np.float32) / 255.0
     overlay = base.copy()
     for channel, value in enumerate(color):
@@ -700,6 +1051,19 @@ def mask_overlay(
 
 
 def provenance_overlay(result: PipelineResult) -> np.ndarray:
+    """Generates the three-color diagnostic overlay showing reconstruction and block status.
+
+    Color coding:
+      - Blue: Reconstructed (inpainted) pixels.
+      - Red: Blocked (unaltered) artifact pixels.
+      - Yellow: Pixels flagged for manual review.
+
+    Args:
+        result: The PipelineResult containing processed stage images and masks.
+
+    Returns:
+        RGB float32 image array.
+    """
     image = result.stages["07_ridge_enhanced_analysis_view"]
     overlay = np.dstack([image, image, image])
     reconstructed = result.masks["reconstructed_pixels"]
@@ -712,6 +1076,13 @@ def provenance_overlay(result: PipelineResult) -> np.ndarray:
 
 
 def display_stage_grid(result: PipelineResult, max_cols: int = 3, figsize: tuple[int, int] = (15, 11)) -> None:
+    """Renders a grid plot displaying all intermediate pipeline stages using Matplotlib.
+
+    Args:
+        result: The PipelineResult object.
+        max_cols: Maximum number of grid columns.
+        figsize: Output figure dimensions.
+    """
     items: list[tuple[str, np.ndarray, str]] = [
         ("Original", result.stages["00_original_gray"], "gray"),
         ("Normalized", result.stages["01_normalized"], "gray"),
@@ -743,6 +1114,12 @@ def display_stage_grid(result: PipelineResult, max_cols: int = 3, figsize: tuple
 
 
 def display_comparison(result: PipelineResult, figsize: tuple[int, int] = (14, 5)) -> None:
+    """Renders a comparison plot showing the original, processed, and provenance overlay.
+
+    Args:
+        result: The PipelineResult object.
+        figsize: Plot figure dimensions.
+    """
     fig, axes = plt.subplots(1, 3, figsize=figsize)
     axes[0].imshow(result.stages["00_original_gray"], cmap="gray", vmin=0, vmax=1)
     axes[0].set_title("Original evidence image")
@@ -757,12 +1134,29 @@ def display_comparison(result: PipelineResult, figsize: tuple[int, int] = (14, 5
 
 
 def metrics_frame(result: PipelineResult) -> pd.DataFrame:
+    """Converts the quality metrics dictionary to a formatted Pandas DataFrame.
+
+    Args:
+        result: The PipelineResult object.
+
+    Returns:
+        Pandas DataFrame containing metrics.
+    """
     frame = pd.DataFrame([result.metrics]).T
     frame.columns = ["value"]
     return frame
 
 
 def save_pipeline_outputs(result: PipelineResult, output_dir: str | Path | None = None) -> dict[str, Path]:
+    """Saves all processed image stages, masks, overlays, and CSV metrics to disk.
+
+    Args:
+        result: The pipeline execution output.
+        output_dir: Parent directory. If None, defaults to config output_dir.
+
+    Returns:
+        Dictionary mapping output file names/keys to their saved file paths.
+    """
     out = Path(output_dir or result.config.output_dir)
     case_dir = out / result.image_path.stem
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -788,6 +1182,16 @@ def process_batch(
     cfg: FingerprintConfig | None = None,
     save_outputs: bool = True,
 ) -> pd.DataFrame:
+    """Executes the pipeline in batch mode across multiple image file paths.
+
+    Args:
+        image_paths: Iterable of file paths to process.
+        cfg: Pipeline configuration. If None, defaults are loaded.
+        save_outputs: If True, saves files for each image to disk.
+
+    Returns:
+        Pandas DataFrame combining quality metrics and warnings across all files.
+    """
     cfg = cfg or FingerprintConfig()
     rows: list[dict[str, Any]] = []
     for path in image_paths:
@@ -801,6 +1205,16 @@ def process_batch(
 
 
 def contact_sheet(image_paths: Iterable[str | Path], thumb_size: tuple[int, int] = (220, 180), cols: int = 4) -> np.ndarray:
+    """Combines multiple fingerprint thumbnails into a single structured image (contact sheet).
+
+    Args:
+        image_paths: Iterable of image file paths to display.
+        thumb_size: Dimensions (width, height) of each thumbnail slot.
+        cols: Number of columns in the grid.
+
+    Returns:
+        RGB float32 image array of the contact sheet.
+    """
     paths = list(image_paths)
     if not paths:
         return np.ones((120, 320, 3), dtype=np.float32)

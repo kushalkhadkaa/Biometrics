@@ -865,15 +865,40 @@ HTML = """
 
 
 def allowed_file(path: Path) -> bool:
+    """Verifies if the given file path has a supported image extension.
+
+    Args:
+        path: Path to the target file.
+
+    Returns:
+        True if the file extension matches the set of permitted extensions, False otherwise.
+    """
     return path.suffix.lower() in ALLOWED_EXTENSIONS
 
 
 def image_url(path: Path) -> str:
+    """Constructs a web-accessible static URL path from a local file path.
+
+    Args:
+        path: Local Path object under the web output directory.
+
+    Returns:
+        A relative URL path string for client-side loading.
+    """
     rel = path.relative_to(WEB_OUTPUTS).as_posix()
     return f"/outputs/{rel}"
 
 
 def save_image(path: Path, image: np.ndarray) -> Path:
+    """Saves a NumPy image array to disk, handling dimensions and range conversion.
+
+    Args:
+        path: Target file path to write to.
+        image: Single-channel or multi-channel float32 or uint8 image array.
+
+    Returns:
+        The Path pointing to the saved file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if image.ndim == 2:
         Image.fromarray(as_uint8(image)).save(path)
@@ -883,10 +908,24 @@ def save_image(path: Path, image: np.ndarray) -> Path:
 
 
 def odd(value: int) -> int:
+    """Ensures an integer is odd (required for certain kernel/block size parameters).
+
+    Args:
+        value: Input integer.
+
+    Returns:
+        The input value if odd, or the next odd integer if even.
+    """
     return value if value % 2 else value + 1
 
 
 def update_job(job_id: str, **fields: object) -> None:
+    """Thread-safe updates to the active jobs memory map.
+
+    Args:
+        job_id: Unique identifier for the background job.
+        **fields: Keyword arguments representing fields and values to update.
+    """
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if not job:
@@ -895,6 +934,13 @@ def update_job(job_id: str, **fields: object) -> None:
 
 
 def append_activity(job_id: str, progress: int, message: str) -> None:
+    """Appends an event activity to a job's live execution log log.
+
+    Args:
+        job_id: Unique identifier for the job.
+        progress: Completion percentage (0 to 100).
+        message: Log statement explaining current status.
+    """
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if not job:
@@ -907,6 +953,11 @@ def append_activity(job_id: str, progress: int, message: str) -> None:
 
 
 def load_history() -> list[dict]:
+    """Loads historical forensic case run records from persistent JSON storage.
+
+    Returns:
+        List of dictionaries detailing completed runs.
+    """
     if not HISTORY_FILE.exists():
         return []
     try:
@@ -916,11 +967,24 @@ def load_history() -> list[dict]:
 
 
 def save_history(items: list[dict]) -> None:
+    """Persists case execution history details to disk.
+
+    Args:
+        items: List of dictionaries representing the updated history array.
+    """
     HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     HISTORY_FILE.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
 
 def created_label(timestamp_iso: str) -> str:
+    """Formats an ISO 8601 timestamp string into a human-readable label.
+
+    Args:
+        timestamp_iso: ISO timestamp string.
+
+    Returns:
+        Formatted date string.
+    """
     try:
         dt = datetime.fromisoformat(timestamp_iso)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -929,6 +993,21 @@ def created_label(timestamp_iso: str) -> str:
 
 
 def summarize_case(metrics: dict[str, float | int | str], warnings: list[str], source_name: str) -> tuple[str, str]:
+    """Generates automated scientific and stakeholder interpretations of case metrics.
+
+    Analyzes computed coherence, noise, and inpainting levels to generate 
+    a professional interpretation report.
+
+    Args:
+        metrics: Quality metric parameters.
+        warnings: List of active validation warning flags.
+        source_name: Name of the processed image file.
+
+    Returns:
+        Tuple:
+            - Scientific report statement (str).
+            - Stakeholder presentation note (str).
+    """
     roi = float(metrics["roi_coverage_pct"])
     coherence = float(metrics["mean_ridge_coherence_roi"])
     noise = float(metrics["noise_residual_mad"])
@@ -1073,6 +1152,15 @@ def auto_config(image_path: Path) -> FingerprintConfig:
 
 
 def build_result(image_path: Path, progress: object | None = None) -> dict:
+    """Executes the pipeline on an input file, saves results, and generates a case payload.
+
+    Args:
+        image_path: Path pointing to the source image.
+        progress: Optional callback function to track execution stages.
+
+    Returns:
+        A dictionary payload containing metadata, file URLs, metrics, and report paths.
+    """
     cfg = auto_config(image_path)
     result = run_pipeline(image_path, cfg, progress_callback=progress)
     case_dir = WEB_OUTPUTS / "cases" / f"{image_path.stem}-{uuid.uuid4().hex[:8]}"
@@ -1083,6 +1171,7 @@ def build_result(image_path: Path, progress: object | None = None) -> dict:
     clean_path = save_image(case_dir / "clean_output.png", result.stages["07_ridge_enhanced_analysis_view"])
     artifact_path = save_image(case_dir / "artifact_map.png", provenance_overlay(result))
 
+    # Compile files representing individual algorithm stages to showcase details
     stage_map = [
         ("Normalized", "01_normalized"),
         ("Illumination", "02_illumination_corrected"),
@@ -1162,10 +1251,22 @@ def build_result(image_path: Path, progress: object | None = None) -> dict:
 
 
 def sample_options() -> list[dict[str, str]]:
+    """Discovers available fingerprint sample images for quick client testing.
+
+    Returns:
+        List of dictionaries with name and local paths to discovered sample files.
+    """
     return [{"name": p.name, "path": str(p)} for p in discover_images()]
 
 
 def resolve_input_image() -> tuple[Path | None, str]:
+    """Resolves and extracts image path from either a file upload or a selected sample.
+
+    Returns:
+        Tuple:
+            - Resolved Path to the local image file (or None if error occurred).
+            - Error description string (empty if resolution was successful).
+    """
     upload = request.files.get("fingerprint")
     if upload and upload.filename:
         filename = secure_filename(upload.filename)
@@ -1190,6 +1291,12 @@ def resolve_input_image() -> tuple[Path | None, str]:
 
 
 def process_job(job_id: str, image_path: Path) -> None:
+    """Worker function that runs the image processing pipeline in a daemon thread.
+
+    Args:
+        job_id: The unique string identifier for tracking this job.
+        image_path: The filesystem Path to the source image.
+    """
     try:
         update_job(job_id, status="running")
         append_activity(job_id, 2, "Queued for processing")
@@ -1208,11 +1315,13 @@ def process_job(job_id: str, image_path: Path) -> None:
 
 @app.route("/outputs/<path:filename>")
 def web_outputs(filename: str):
+    """Flask route serving generated artifacts, stage images, and report PDFs."""
     return send_from_directory(WEB_OUTPUTS, filename)
 
 
 @app.route("/")
 def index():
+    """Flask route rendering the interactive HTML front-end dashboard."""
     WEB_OUTPUTS.mkdir(parents=True, exist_ok=True)
     UPLOADS.mkdir(parents=True, exist_ok=True)
     history = load_history()
@@ -1221,6 +1330,7 @@ def index():
 
 @app.route("/api/process", methods=["POST"])
 def api_process():
+    """API endpoint to trigger background fingerprint processing asynchronously."""
     WEB_OUTPUTS.mkdir(parents=True, exist_ok=True)
     UPLOADS.mkdir(parents=True, exist_ok=True)
     image_path, error = resolve_input_image()
@@ -1247,6 +1357,7 @@ def api_process():
 
 @app.route("/api/job/<job_id>")
 def api_job(job_id: str):
+    """API endpoint to retrieve the current state and execution logs of a job."""
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -1256,6 +1367,7 @@ def api_job(job_id: str):
 
 @app.route("/health")
 def health():
+    """Liveness check health endpoint."""
     return {"status": "ok"}
 
 
